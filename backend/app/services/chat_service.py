@@ -39,6 +39,54 @@ DOMAIN_KEYWORDS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 _RULES = [
+
+    # total billing (short query)
+    (r"^total.{0,15}bill|^bill.{0,15}total|total.{0,10}invoic",
+     """SELECT SUM(total_net_amount) AS total_billing_amount,
+               COUNT(*) AS total_docs,
+               SUM(CASE WHEN is_cancelled=1 THEN 1 ELSE 0 END) AS cancelled,
+               transaction_currency
+        FROM billing_document_headers GROUP BY transaction_currency""",
+     lambda r: f"Total billing: {r[0]['transaction_currency']} {r[0]['total_billing_amount']:,.2f} across {r[0]['total_docs']} documents ({r[0]['cancelled']} cancelled)." if r else "No data."),
+
+    # list/show products
+    (r"(list|show|get|all|what).{0,20}(product|material|item)",
+     """SELECT p.product, COALESCE(pd.product_description, p.product) AS description,
+               p.product_type, p.product_group
+        FROM products p
+        LEFT JOIN product_descriptions pd ON p.product=pd.product AND pd.language='EN'
+        ORDER BY p.product LIMIT 30""",
+     lambda r: f"Found {len(r)} products. Examples: " + ", ".join(x.get('description', x['product']) for x in r[:5])),
+
+    # list/show orders
+    (r"(list|show|get|all).{0,20}(order|sales order)",
+     """SELECT sales_order, sold_to_party, total_net_amount,
+               transaction_currency, overall_delivery_status, creation_date
+        FROM sales_order_headers ORDER BY creation_date DESC LIMIT 20""",
+     lambda r: f"Found {len(r)} sales orders. Latest: " + ", ".join(x['sales_order'] for x in r[:5])),
+
+    # list/show payments
+    (r"(list|show|all|get).{0,20}(payment|paid)",
+     """SELECT accounting_document, customer, amount_in_transaction_currency,
+               transaction_currency, clearing_date, posting_date
+        FROM payments_accounts_receivable ORDER BY posting_date DESC LIMIT 20""",
+     lambda r: f"Found {len(r)} payments. Total: {sum(x['amount_in_transaction_currency'] or 0 for x in r):,.2f}."),
+
+    # list deliveries
+    (r"(list|show|all).{0,20}(deliver)",
+     """SELECT delivery_document, overall_goods_movement_status,
+               overall_picking_status, creation_date
+        FROM outbound_delivery_headers ORDER BY creation_date DESC LIMIT 20""",
+     lambda r: f"Found {len(r)} deliveries."),
+
+    # all customers / list customers
+    (r"(all|list|show).{0,15}customer",
+     """SELECT bp.full_name, bp.business_partner,
+               COUNT(so.sales_order) AS total_orders
+        FROM business_partners bp
+        LEFT JOIN sales_order_headers so ON bp.business_partner=so.sold_to_party
+        GROUP BY bp.business_partner ORDER BY total_orders DESC""",
+     lambda r: f"{len(r)} customers: " + ", ".join(f"{x['full_name']} ({x['total_orders']} orders)" for x in r)),
     # top products by billing docs
     (r"(top|highest|most).{0,30}(product|material).{0,30}(billing|invoice)",
      """SELECT COALESCE(pd.product_description,p.product) AS product_name,
@@ -244,10 +292,12 @@ def _strip_fences(text):
     return re.sub(r"\s*```$", "", text).strip()
 
 
-SYSTEM_PROMPT = """You are an O2C data analyst. Convert natural language questions into SQLite SELECT queries.
+SYSTEM_PROMPT = """You are an O2C data analyst. Convert ANY question about business data into SQLite SELECT queries.
+Be GENEROUS — if the question could relate to orders, billing, products, customers, payments, or deliveries, generate SQL for it.
+Only return out_of_domain for completely unrelated topics like weather, sports, cooking, or general knowledge.
 
 RETURN ONLY JSON: {"intent":"query","sql":"SELECT ...","answer_template":""}
-If out-of-domain: {"intent":"out_of_domain","sql":"","answer_template":""}
+If truly out-of-domain: {"intent":"out_of_domain","sql":"","answer_template":""}
 
 TABLES: sales_order_headers, sales_order_items, outbound_delivery_headers, outbound_delivery_items,
 billing_document_headers (is_cancelled=0/1), billing_document_items, payments_accounts_receivable,
@@ -260,6 +310,13 @@ KEY JOINS:
 - billing_document_headers.accounting_document = payments_accounts_receivable.accounting_document
 - sales_order_headers.sold_to_party → business_partners.business_partner
 - product_descriptions: JOIN on product + language='EN'
+
+EXAMPLES OF SHORT QUERIES YOU MUST HANDLE:
+- "total billing" → SELECT SUM(total_net_amount) AS total_billing, COUNT(*) AS count FROM billing_document_headers WHERE is_cancelled=0
+- "list products" → SELECT p.product, pd.product_description FROM products p LEFT JOIN product_descriptions pd ON p.product=pd.product AND pd.language='EN' LIMIT 50
+- "show orders" → SELECT sales_order, sold_to_party, total_net_amount, overall_delivery_status FROM sales_order_headers LIMIT 20
+- "all customers" → SELECT business_partner, full_name FROM business_partners
+- "payments" → SELECT accounting_document, customer, amount_in_transaction_currency, clearing_date FROM payments_accounts_receivable LIMIT 20
 """
 
 
@@ -331,7 +388,20 @@ def _call_llm_summary(question: str, sql: str, rows: list) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_domain(q: str) -> bool:
-    return any(kw in q.lower() for kw in DOMAIN_KEYWORDS)
+    q_lower = q.lower()
+    # Block obvious non-domain topics
+    blocked = ["weather","recipe","cook","sport","football","cricket","movie",
+               "song","poem","write a","capital of","who is the president",
+               "translate","joke","story"]
+    if any(b in q_lower for b in blocked):
+        return False
+    # Allow if it has any domain keyword OR is a short query (user exploring)
+    if any(kw in q_lower for kw in DOMAIN_KEYWORDS):
+        return True
+    # Allow very short queries — user is probably exploring the dataset
+    if len(q.split()) <= 4:
+        return True
+    return False
 
 
 def _safe_sql(sql: str) -> bool:
