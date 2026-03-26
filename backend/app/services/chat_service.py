@@ -389,6 +389,39 @@ def _call_llm_summary(question: str, sql: str, rows: list) -> str:
 
 def _is_domain(q: str) -> bool:
     q_lower = q.lower()
+
+    # ❌ Strong block (only obvious unrelated queries)
+    blocked = [
+        "weather", "recipe", "cook", "sport", "football", "cricket",
+        "movie", "song", "poem", "write a", "capital of",
+        "who is", "translate", "joke", "story"
+    ]
+    if any(b in q_lower for b in blocked):
+        return False
+
+    # ✅ Strong allow (clear business/domain intent)
+    if any(kw in q_lower for kw in DOMAIN_KEYWORDS):
+        return True
+
+    # ✅ Allow analytical language (VERY IMPORTANT FIX)
+    analytics_words = [
+        "top", "most", "highest", "lowest",
+        "average", "sum", "total", "count",
+        "compare", "trend", "distribution"
+    ]
+    if any(word in q_lower for word in analytics_words):
+        return True
+
+    # ✅ Allow short exploratory queries
+    if len(q.split()) <= 5:
+        return True
+
+    # ✅ Allow if numbers present (IDs like orders, docs)
+    if any(char.isdigit() for char in q):
+        return True
+
+    return False
+    q_lower = q.lower()
     # Block obvious non-domain topics
     blocked = ["weather","recipe","cook","sport","football","cricket","movie",
                "song","poem","write a","capital of","who is the president",
