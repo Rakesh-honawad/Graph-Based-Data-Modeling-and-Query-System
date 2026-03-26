@@ -481,7 +481,7 @@ AI tools were used extensively throughout this project. Full session transcripts
 
 ```
 ai-session-logs/
-└── claude-session-log-v2.md    # Claude Code session — architecture, ETL, LLM pipeline, D3 hooks
+
 ```
 
 The logs cover:
@@ -494,7 +494,3 @@ The logs cover:
 - Deployment configuration for Vercel + Render
 
 ---
-
-## License
-
-This project was built as part of a technical assignment. All SAP O2C dataset rights belong to their respective owners.
